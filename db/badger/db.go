@@ -18,15 +18,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/dgraph-io/badger"
-	"github.com/dgraph-io/badger/options"
+	"github.com/dgraph-io/badger/v4"
 	"github.com/magiconair/properties"
 	"github.com/pingcap/go-ycsb/pkg/prop"
 	"github.com/pingcap/go-ycsb/pkg/util"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
 )
 
-//  properties
+// properties
 const (
 	badgerDir                     = "badger.dir"
 	badgerValueDir                = "badger.valuedir"
@@ -90,43 +89,22 @@ func (c badgerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 }
 
 func getOptions(p *properties.Properties) badger.Options {
-	opts := badger.DefaultOptions
-	opts.Dir = p.GetString(badgerDir, "/tmp/badger")
+	opts := badger.DefaultOptions(p.GetString(badgerDir, "/tmp/badger"))
 	opts.ValueDir = p.GetString(badgerValueDir, opts.Dir)
 
 	opts.SyncWrites = p.GetBool(badgerSyncWrites, false)
 	opts.NumVersionsToKeep = p.GetInt(badgerNumVersionsToKeep, 1)
-	opts.MaxTableSize = p.GetInt64(badgerMaxTableSize, 64<<20)
+	opts.BaseTableSize = p.GetInt64(badgerMaxTableSize, opts.BaseTableSize)
 	opts.LevelSizeMultiplier = p.GetInt(badgerLevelSizeMultiplier, 10)
 	opts.MaxLevels = p.GetInt(badgerMaxLevels, 7)
-	opts.ValueThreshold = p.GetInt(badgerValueThreshold, 32)
+	opts.ValueThreshold = p.GetInt64(badgerValueThreshold, opts.ValueThreshold)
 	opts.NumMemtables = p.GetInt(badgerNumMemtables, 5)
 	opts.NumLevelZeroTables = p.GetInt(badgerNumLevelZeroTables, 5)
-	opts.NumLevelZeroTablesStall = p.GetInt(badgerNumLevelZeroTablesStall, 10)
-	opts.LevelOneSize = p.GetInt64(badgerLevelOneSize, 256<<20)
+	opts.NumLevelZeroTablesStall = p.GetInt(badgerNumLevelZeroTablesStall, 15)
+	opts.BaseLevelSize = p.GetInt64(badgerLevelOneSize, opts.BaseLevelSize)
 	opts.ValueLogFileSize = p.GetInt64(badgerValueLogFileSize, 1<<30)
 	opts.ValueLogMaxEntries = uint32(p.GetUint64(badgerValueLogMaxEntries, 1000000))
 	opts.NumCompactors = p.GetInt(badgerNumCompactors, 3)
-	opts.DoNotCompact = p.GetBool(badgerDoNotCompact, false)
-	if b := p.GetString(badgerTableLoadingMode, "LoadToRAM"); len(b) > 0 {
-		if b == "FileIO" {
-			opts.TableLoadingMode = options.FileIO
-		} else if b == "LoadToRAM" {
-			opts.TableLoadingMode = options.LoadToRAM
-		} else if b == "MemoryMap" {
-			opts.TableLoadingMode = options.MemoryMap
-		}
-	}
-	if b := p.GetString(badgerValueLogLoadingMode, "MemoryMap"); len(b) > 0 {
-		if b == "FileIO" {
-			opts.ValueLogLoadingMode = options.FileIO
-		} else if b == "LoadToRAM" {
-			opts.ValueLogLoadingMode = options.LoadToRAM
-		} else if b == "MemoryMap" {
-			opts.ValueLogLoadingMode = options.MemoryMap
-		}
-	}
-
 	return opts
 }
 
@@ -153,13 +131,10 @@ func (db *badgerDB) Read(ctx context.Context, table string, key string, fields [
 		if err != nil {
 			return err
 		}
-		row, err := item.Value()
-		if err != nil {
+		return item.Value(func(v []byte) error {
+			m, err = db.r.Decode(v, fields)
 			return err
-		}
-
-		m, err = db.r.Decode(row, fields)
-		return err
+		})
 	})
 
 	return m, err
@@ -203,13 +178,11 @@ func (db *badgerDB) Update(ctx context.Context, table string, key string, values
 			return err
 		}
 
-		value, err := item.Value()
-		if err != nil {
+		var data map[string][]byte
+		if err := item.Value(func(v []byte) error {
+			data, err = db.r.Decode(v, nil)
 			return err
-		}
-
-		data, err := db.r.Decode(value, nil)
-		if err != nil {
+		}); err != nil {
 			return err
 		}
 

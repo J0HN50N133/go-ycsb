@@ -218,13 +218,13 @@ func (db *s3DB) Scan(ctx context.Context, table string, startKey string, count i
 			maxKeys = 1000
 		}
 
-		out, err := db.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
-			Bucket:            &db.bucket,
-			Prefix:            &prefix,
-			StartAfter:        &startAfter,
-			ContinuationToken: contToken,
-			MaxKeys:           maxKeys,
-		})
+			out, err := db.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
+				Bucket:            &db.bucket,
+				Prefix:            &prefix,
+				StartAfter:        &startAfter,
+				ContinuationToken: contToken,
+				MaxKeys:           &maxKeys,
+			})
 		if err != nil {
 			return nil, err
 		}
@@ -262,9 +262,9 @@ func (db *s3DB) Scan(ctx context.Context, table string, startKey string, count i
 			remaining--
 		}
 
-		if !out.IsTruncated || remaining == 0 {
-			break
-		}
+			if !aws.ToBool(out.IsTruncated) || remaining == 0 {
+				break
+			}
 		contToken = out.NextContinuationToken
 	}
 
