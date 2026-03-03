@@ -15,8 +15,10 @@ package badger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/magiconair/properties"
@@ -45,6 +47,8 @@ const (
 	badgerDoNotCompact            = "badger.do_not_compact"
 	badgerTableLoadingMode        = "badger.table_loading_mode"
 	badgerValueLogLoadingMode     = "badger.value_log_loading_mode"
+	badgerValueLogGCInterval      = "badger.value_log_gc_interval"
+	badgerValueLogGCDiscardRatio  = "badger.value_log_gc_discard_ratio"
 	// TODO: add more configurations
 )
 
@@ -58,6 +62,9 @@ type badgerDB struct {
 
 	r       *util.RowCodec
 	bufPool *util.BufPool
+
+	gcCancel context.CancelFunc
+	gcDone   chan struct{}
 }
 
 type contextKey string
@@ -80,12 +87,17 @@ func (c badgerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		return nil, err
 	}
 
-	return &badgerDB{
+	out := &badgerDB{
 		p:       p,
 		db:      db,
 		r:       util.NewRowCodec(p),
 		bufPool: util.NewBufPool(),
-	}, nil
+	}
+	if err := out.startValueLogGC(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return out, nil
 }
 
 func getOptions(p *properties.Properties) badger.Options {
@@ -109,7 +121,57 @@ func getOptions(p *properties.Properties) badger.Options {
 }
 
 func (db *badgerDB) Close() error {
+	if db.gcCancel != nil {
+		db.gcCancel()
+	}
+	if db.gcDone != nil {
+		<-db.gcDone
+	}
 	return db.db.Close()
+}
+
+func (db *badgerDB) startValueLogGC() error {
+	interval := db.p.GetDuration(badgerValueLogGCInterval, 0)
+	if interval == 0 {
+		return nil
+	}
+	if interval < 0 {
+		return fmt.Errorf("%s must be >= 0", badgerValueLogGCInterval)
+	}
+
+	discardRatio := db.p.GetFloat64(badgerValueLogGCDiscardRatio, 0.5)
+	if discardRatio <= 0 || discardRatio >= 1 {
+		return fmt.Errorf("%s must be in (0,1)", badgerValueLogGCDiscardRatio)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	db.gcCancel = cancel
+	db.gcDone = make(chan struct{})
+
+	go func() {
+		defer close(db.gcDone)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runValueLogGC(db.db, discardRatio)
+			}
+		}
+	}()
+
+	return nil
+}
+
+func runValueLogGC(db *badger.DB, discardRatio float64) {
+	// Keep semantics close to badger/cmd/write_bench.go: invoke one GC attempt per tick.
+	err := db.RunValueLogGC(discardRatio)
+	if err == nil || errors.Is(err, badger.ErrNoRewrite) {
+		return
+	}
 }
 
 func (db *badgerDB) InitThread(ctx context.Context, _ int, _ int) context.Context {
