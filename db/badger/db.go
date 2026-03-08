@@ -49,6 +49,7 @@ const (
 	badgerValueLogLoadingMode     = "badger.value_log_loading_mode"
 	badgerValueLogGCInterval      = "badger.value_log_gc_interval"
 	badgerValueLogGCDiscardRatio  = "badger.value_log_gc_discard_ratio"
+	badgerScanPrefetchSize        = "badger.scan_prefetch_size"
 	// TODO: add more configurations
 )
 
@@ -59,6 +60,8 @@ type badgerDB struct {
 	p *properties.Properties
 
 	db *badger.DB
+
+	scanIteratorOptions badger.IteratorOptions
 
 	r       *util.RowCodec
 	bufPool *util.BufPool
@@ -76,6 +79,10 @@ type badgerState struct {
 
 func (c badgerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	opts := getOptions(p)
+	scanIteratorOptions, err := getScanIteratorOptions(p)
+	if err != nil {
+		return nil, err
+	}
 
 	if p.GetBool(prop.DropData, prop.DropDataDefault) {
 		os.RemoveAll(opts.Dir)
@@ -88,10 +95,11 @@ func (c badgerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	}
 
 	out := &badgerDB{
-		p:       p,
-		db:      db,
-		r:       util.NewRowCodec(p),
-		bufPool: util.NewBufPool(),
+		p:                   p,
+		db:                  db,
+		scanIteratorOptions: scanIteratorOptions,
+		r:                   util.NewRowCodec(p),
+		bufPool:             util.NewBufPool(),
 	}
 	if err := out.startValueLogGC(); err != nil {
 		_ = db.Close()
@@ -118,6 +126,15 @@ func getOptions(p *properties.Properties) badger.Options {
 	opts.ValueLogMaxEntries = uint32(p.GetUint64(badgerValueLogMaxEntries, 1000000))
 	opts.NumCompactors = p.GetInt(badgerNumCompactors, 3)
 	return opts
+}
+
+func getScanIteratorOptions(p *properties.Properties) (badger.IteratorOptions, error) {
+	opts := badger.DefaultIteratorOptions
+	opts.PrefetchSize = p.GetInt(badgerScanPrefetchSize, opts.PrefetchSize)
+	if opts.PrefetchSize <= 0 {
+		return badger.IteratorOptions{}, fmt.Errorf("%s must be > 0", badgerScanPrefetchSize)
+	}
+	return opts, nil
 }
 
 func (db *badgerDB) Close() error {
@@ -206,7 +223,7 @@ func (db *badgerDB) Scan(ctx context.Context, table string, startKey string, cou
 	res := make([]map[string][]byte, count)
 	err := db.db.View(func(txn *badger.Txn) error {
 		rowStartKey := db.getRowKey(table, startKey)
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		it := txn.NewIterator(db.scanIteratorOptions)
 		defer it.Close()
 
 		i := 0
